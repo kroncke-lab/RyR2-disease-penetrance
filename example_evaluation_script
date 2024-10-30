@@ -1,0 +1,224 @@
+### Calculate Weighted Spearman Correlation Coefficients
+Evaluate weighted Spearman correlations coefficients between observed LQT2 diagnosis probability in the literature and various potential predictors 
+
+```{r}
+# Merge "d" with full variant list and set carrier counts to 0. 
+# This is done for convenience so we can estimate LQT2 diagnosis probability for all variants including 
+# those witheld during model construction. This will make validation easier.
+d <- merge(d, h2.covariates, all = TRUE)
+d <- unique(d) 
+
+calcPval=function(xName,yName,weightName,nPerms,new.mat2){
+  # Pulls out variables
+
+  x=new.mat2[,xName] 
+  y=new.mat2[,yName] 
+  w=new.mat2[,weightName]
+  x2=x[!is.na(x)]
+  y2=y[!is.na(x)]
+  w2=w[!is.na(x)]
+
+  # Calculate the real correlation
+  realCorr=weightedCorr(x2,y2,method='spearman',weights=w2)
+  # Do permutations, calculate fake correlations
+  permutedCorrList=c()
+  for(permNum in 1:nPerms){
+    permutedX=sample(x2,length(x2),replace=FALSE)
+    wCorrSim=weightedCorr(permutedX,y2,method='spearman',weights=w2)
+    permutedCorrList=c(permutedCorrList,wCorrSim)
+  }
+  permutedCorrList2=abs(permutedCorrList)
+  realCorr2=abs(realCorr)
+  
+  # Calculate pvalue
+  summ=sum(realCorr2<permutedCorrList2)
+  pValue=summ/nPerms
+  return(list(realCorr,pValue,length(x2)))
+}
+
+calcAllPvals=function(yList,xList,nPerms,weightName,new.mat2){
+  i=0
+  resultTable=data.frame()
+  for(yName in yList){
+    for(xName in xList){
+      i=i+1
+      result=calcPval(xName,yName,weightName,nPerms,new.mat2)
+      resultTable[i,'x']=xName
+      resultTable[i,'y']=yName
+      resultTable[i,'nPerms']=nPerms
+      resultTable[i,'weightedCorr']=result[[1]]
+      resultTable[i,'pValue']=result[[2]]
+      resultTable[i,'n']=result[[3]]
+      #print(resultTable[i,'pValue'])
+    }
+  }
+  print(resultTable)
+  return(resultTable)
+}
+
+
+yList=c('penetrance_lqt2')
+xList=c('hm_ssPeak','hm_tailPeak','hm_vhalfact','hm_vhalfinact','hm_recovfrominact', 'hm_taudeact_fast', 
+        'ht_ssPeak','ht_tailPeak','ht_vhalfact','ht_vhalfinact','ht_recovfrominact', 'ht_taudeact_fast',
+        'pph2_prob', 'provean_score', "blast_pssm",
+        'pamscore', 'aasimilaritymat', "lqt2_dist", "revel_score")
+tmp<-d[!is.na(d$penetrance_lqt2) & !is.na(d$revel_score),]
+resultTable<-calcAllPvals(yList, xList, 1000, 'weight', tmp)
+
+tmp<-d[!is.na(d$ht_tailPeak) & !is.na(d$penetrance_lqt2) & !is.na(d$revel_score),]
+resultTable<-calcAllPvals(yList, xList, 1000, 'weight', tmp)
+
+```
+## Literature Variants Where N = 1 Variants are removed
+
+```{r}
+
+# Literature dataset where potentially overlapping carriers/heterozygotes are removed
+d <- lit.nonoverlap.data[lit.nonoverlap.data$mut_type == "missense",]
+
+# set initial weighting and penetrance
+d$weight = 1-1/(0.01+d$total_carriers)
+d$penetrance_lqt2 <- d$lqt2/d$total_carriers
+d[d$total_carriers < 2,"weight"] <- 0.000 # This is changed to "< 2" here to evaluate ROC-AUC of n=1 variants from the literature
+
+
+```
+# Part 4: ROC and AUC plots
+
+## ROCs of observed cohort LQT2 diagnosis probability with 0.5 as cutoff all variants. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+load("cohort_checkpoint.RData")
+
+cohort.data$lqt2_patho <- NA
+cohort.data$lqt2_patho[cohort.data$penetrance_lqt2>=0.5] <- 1
+cohort.data$lqt2_patho[cohort.data$penetrance_lqt2<0.5] <- 0
+
+fglm<-cohort.data[!is.na(cohort.data$blast_pssm),]# & cohort.data$total_carriers == 1, ]
+
+colrs <- c("red", "green", "orange", "blue", "black", "gray")
+modfunc1 <- glm(lqt2_patho~pph2_prob, data = fglm, family = 'binomial')
+modfunc2 <- glm(lqt2_patho~revel_score, data = fglm, family = 'binomial')
+modfunc3 <- glm(lqt2_patho~blast_pssm, data = fglm, family = 'binomial')
+modfunc4 <- glm(lqt2_patho~provean_score, data = fglm, family = 'binomial')
+modfunc5 <- glm(lqt2_patho~pamscore, data = fglm, family = 'binomial')
+modfunc6 <- glm(lqt2_patho~lqt2_dist, data = fglm, family = 'binomial')
+modfunc7 <- glm(lqt2_patho~p_mean_w, data = fglm, family = 'binomial')
+
+funs <- list(modfunc2, modfunc3, modfunc4, modfunc5, modfunc6, modfunc7)
+
+i=0
+par(pty="s")
+tmp<-roc(fglm$lqt2_patho[row.names(fglm) %in% as.numeric(names(predict(modfunc1)))], predict(modfunc1), ci=T)
+plot.roc(tmp, col = "magenta")
+
+for(li in funs){
+  i=i+1
+  tmp<-roc(fglm$lqt2_patho[row.names(fglm) %in% as.numeric(names(predict(li)))], predict(li), ci=T)
+  plot.roc(tmp,add = T, col = colrs[i])
+}
+
+```
+
+## AUCs from ROCs observed cohort LQT2 diagnosis probability at multiple cutoffs
+AUCs from ROCs predicting EM posteriors 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+load("cohort_checkpoint.RData")
+
+# Wrapper for convenience of making GLMs and outputting AUCs
+glm.mod=function(fglm,independent){
+  in_string <- paste(independent, collapse=" + ")
+  regression_formula <- as.formula(paste("lqt2_patho", in_string, sep=" ~ "))
+  mod <- glm(regression_formula, data = fglm, family = 'binomial')
+  tmp<-roc(fglm$lqt2_patho[row.names(fglm) %in% as.numeric(names(predict(mod)))], predict(mod), ci=T)
+  return(tmp$auc)
+}
+
+cohort.data$lqt2_patho <- NA
+cohort.data$lqt2_patho[cohort.data$penetrance_lqt2>=0.2] <- 1
+cohort.data$lqt2_patho[cohort.data$penetrance_lqt2<0.2] <- 0
+
+cutoffs <- seq(0.1,0.8,0.05)
+colrs <- c("red", "green", "orange", "blue", "black", "gray")
+
+fglm<-cohort.data[!is.na(cohort.data$blast_pssm) & cohort.data$total_carriers > 0, ]
+fglm<-fglm[!is.na(fglm$var),]
+fglm <- fglm[,!names(fglm) %in%  "cardiacboost"]
+fglm <- unique(fglm)
+
+dist.only <- 0
+blast1 <- 0
+polyphen1 <- 0
+prov1 <- 0
+EM <- 0
+revel<-0
+pamscore <- 0
+len.new<-0
+i=0
+for (co in cutoffs){
+  fglm$lqt2_patho[fglm$penetrance_lqt2>=co] <- 1
+  fglm$lqt2_patho[fglm$penetrance_lqt2<co] <- 0
+  print(paste(length(fglm$lqt2_patho), " ", sum(fglm$lqt2_patho)))
+  if (!sum(fglm$lqt2_patho)<6){
+  i=i+1
+
+  pamscore[i]<-glm.mod(fglm,"pamscore")
+  blast1[i]<-glm.mod(fglm,"blast_pssm")
+  polyphen1[i]<-glm.mod(fglm,"pph2_prob")
+  revel[i]<-glm.mod(fglm,"revel_score")
+  prov1[i]<-glm.mod(fglm,"provean_score")
+  dist.only[i]<-glm.mod(fglm,"lqt2_dist")
+  EM[i]<-glm.mod(fglm,"p_mean_w")
+  }
+}
+
+par(cex=1, bty='l', lwd=2)
+plot(cutoffs[1:i],polyphen1,col="magenta",type = "l",ylim = c(0.5,1), ylab = "AUC")#, 
+
+lines(cutoffs[1:i],revel,col=colrs[1]) # red
+lines(cutoffs[1:i],blast1,col=colrs[2]) # green
+lines(cutoffs[1:i],prov1,col=colrs[3]) # orange
+lines(cutoffs[1:i],pamscore,col=colrs[4]) # blue 
+lines(cutoffs[1:i],dist.only,col=colrs[5]) # black
+lines(cutoffs[1:i],EM,col=colrs[6]) # gray
+
+```
+
+## ROCs of observed cohort LQT2 diagnosis probability with single observation variants. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+load("cohort_checkpoint.RData")
+
+cohort.data$lqt2_patho <- NA
+cohort.data$lqt2_patho[cohort.data$penetrance_lqt2>=0.5] <- 1
+cohort.data$lqt2_patho[cohort.data$penetrance_lqt2<0.5] <- 0
+
+fglm<-cohort.data[!is.na(cohort.data$blast_pssm) & cohort.data$total_carriers == 1, ]
+fglm <- fglm[,!names(fglm) %in%  "cardiacboost"]
+fglm <- unique(fglm)
+
+colrs <- c("red", "green", "orange", "blue", "black", "gray")
+modfunc1 <- glm(lqt2_patho~pph2_prob, data = fglm, family = 'binomial')
+modfunc2 <- glm(lqt2_patho~revel_score, data = fglm, family = 'binomial')
+modfunc3 <- glm(lqt2_patho~blast_pssm, data = fglm, family = 'binomial')
+modfunc4 <- glm(lqt2_patho~provean_score, data = fglm, family = 'binomial')
+modfunc5 <- glm(lqt2_patho~pamscore, data = fglm, family = 'binomial')
+modfunc6 <- glm(lqt2_patho~lqt2_dist, data = fglm, family = 'binomial')
+modfunc7 <- glm(lqt2_patho~p_mean_w, data = fglm, family = 'binomial')
+
+funs <- list(modfunc2, modfunc3, modfunc4, modfunc5, modfunc6, modfunc7)
+
+i=0
+par(pty="s")
+tmp<-roc(fglm$lqt2_patho[row.names(fglm) %in% as.numeric(names(predict(modfunc1)))], predict(modfunc1), ci=T)
+plot.roc(tmp, col = "magenta")
+
+for(li in funs){
+  i=i+1
+  tmp<-roc(fglm$lqt2_patho[row.names(fglm) %in% as.numeric(names(predict(li)))], predict(li), ci=T)
+  plot.roc(tmp,add = T, col = colrs[i])
+  print(tmp$auc)
+}
+
+```
